@@ -5,176 +5,182 @@
 # Non-Volatile:~/Library/Application Support/Alfred 2/Workflow Data/[bundle id]
 
 # To any pythoners out there who may read this script: this is probably atrocious code
-# but it's my first python script. Forgive me. Maybe join the github development 
+# but it's my first python script. Forgive me. Maybe join the github development
 
 # Written by Shawn Patrick Rice
 # Post-release help from Clinxs (https://github.com/clintxs)
 
-import alp
-import re
+from __future__ import print_function, unicode_literals
+
+import plistlib
 import os
-import getpass
+import tempfile
+import subprocess
+try:
+    import xml.etree.cElementTree as ET
+except ImportError:
+    import xml.etree.ElementTree as ET
 
-user = getpass.getuser()
 
-dir = "/Users/" + user + "/Library/Application Support/Alfred 2/Workflow Data/com.help.shawn.rice"
-edir = "/Users/" + user + "/Library/Application\ Support/Alfred\ 2/Workflow\ Data/com.help.shawn.rice"
+TEMPLATE = os.path.join(os.path.dirname(__file__), 'template.html')
 
-if not os.path.isdir(dir):
-	os.makedirs(dir)
+HTML = open(TEMPLATE, 'rb').read().decode('utf-8')
 
-output_file = "alfred-help.md"
-
-location = dir + "/" + output_file
-file = open(location, "w")
-
-hotmod = {		131072 : "shift",
-				262144 : "control",
-				262401 : "control", # https://github.com/shawnrice/alfred2-workflow-help/pull/2/files
-				393216 : "shift+control",
-				524288 : "option",
-				655360 : "shift+option",
-				786432 : "control+option",
-				917504 : "shift+control+option",
-				1048576 : "command",
-				1179648 : "shift+command",
-				1310720 : "control+command",
-				1310985 : "control+command", # https://github.com/shawnrice/alfred2-workflow-help/pull/2/files
-				1441792 : "shift+control+command",
-				1572864 : "option+command",
-				1703936 : "shift+option+command",
-				1835008 : "control+option+command",
-				1966080 : "shift+control+option+command"
+HOTMOD = {
+    131072: "shift",
+    262144: "control",
+    262401: "control",  # https://github.com/shawnrice/alfred2-workflow-help/pull/2/files
+    393216: "shift+control",
+    524288: "option",
+    655360: "shift+option",
+    786432: "control+option",
+    917504: "shift+control+option",
+    1048576: "command",
+    1179648: "shift+command",
+    1310720: "control+command",
+    1310985: "control+command",  # https://github.com/shawnrice/alfred2-workflow-help/pull/2/files
+    1441792: "shift+control+command",
+    1572864: "option+command",
+    1703936: "shift+option+command",
+    1835008: "control+option+command",
+    1966080: "shift+control+option+command"
 }
 
-hotarg = {		0 : "No Argument",
-				1 : "Selection in OS X",
-				2 : "OS X Clipboard Contents",
-				3 : "Text"
+HOTARG = {
+    0: "No Argument",
+    1: "Selection in OS X",
+    2: "OS X Clipboard Contents",
+    3: "Text"
 }
 
-hotaction = { 	0 : "Pass through to Workflow",
-				1 : "Show Alfred"
+HOTACTION = {
+    0: "Pass through to Workflow",
+    1: "Show Alfred"
 }
 
-listdir = os.getcwd() + "/../" # there has to be a more elegant way to do this... 
-# list of directories in the 
 
-dirs = os.walk(listdir).next()[1]
-# walk through the directory list array
+def load_workflow(dirpath):
+    """Load data from workflow in ``dirpath``"""
+    data = {}
+    commands = []
+    hotkeys = []
+    plist = os.path.join(dirpath, 'info.plist')
+    data['icon'] = os.path.join(dirpath, 'icon.png')
+    if not os.path.exists(plist):
+        raise ValueError('Not a workflow : %s' % dirpath)
+    info = plistlib.readPlist(plist)
+    for key in ('name', 'bundleid', 'createdby', 'disabled', 'description'):
+        value = info.get(key)
+        if isinstance(value, str):
+            value = unicode(value, 'utf-8')
+        data[key] = value
+    # Commands & hotkeys
+    for item in info.get('objects', []):
+        config = item.get('config', {})
+        if item['type'] in ('alfred.workflow.input.keyword',
+                            'alfred.workflow.input.scriptfilter'):
+            command = {}
+            for key in ('keyword', 'text', 'subtext', 'title'):
+                if key in config:
+                    command[key] = config[key].decode('utf-8')
+            commands.append(command)
+        elif item['type'] == 'alfred.workflow.trigger.hotkey':
+            hotkey = {}
+            if 'hotmod' in config:
+                if config['hotmod'] in HOTMOD:
+                    hotkey['key'] = HOTMOD[config['hotmod']]
+                    hotkey['string'] = config['hotstring']
+                else:
+                    hotkey['undefined'] = True
+            if 'argument' in config:
+                hotkey['argument'] = HOTARG[config['argument']]
+            hotkeys.append(hotkey)
+    data['commands'] = commands
+    data['hotkeys'] = hotkeys
+    return data
 
-workflows = {} # empty dictionary to hold the individual workflow information
 
-for item in dirs:
-#	if item != "alfred-help": # this is just for my debugging purposes and will disappear soon
+def workflow_html(workflow):
+    """Generate HTML fragment for the workflow"""
+    root = ET.Element('div', {'class': 'workflow'})
+    ET.SubElement(root, 'img', {'src': workflow['icon'],
+                                'class': 'icon',
+                                'width': '50'})
+    h2 = ET.SubElement(root, 'h2')
+    h2.text = workflow['name']
+    if workflow.get('bundleid'):
+        ET.SubElement(h2, 'span',
+                      {'class': 'bundleid'}).text = workflow['bundleid']
+    else:
+        ET.SubElement(h2, 'span',
+                      {'class': 'bundleid error'}
+                      ).text = 'NO BUNDLE ID DEFINED'
+    if workflow.get('createdby'):
+        ET.SubElement(root, 'p',
+                      {'class': 'author'}
+                      ).text = 'by %s' % workflow['createdby']
+    else:
+        ET.SubElement(root, 'p',
+                      {'class': 'author error'}
+                      ).text = 'NO CREATOR ID'
+    if workflow.get('description'):
+        ET.SubElement(root, 'p',
+                      {'class': 'description'}).text = workflow['description']
+    cmdlist = ET.SubElement(root, 'ul')
+    for command in workflow.get('commands', []):
+        li = ET.SubElement(cmdlist, 'li')
+        if not command.get('keyword'):
+            ET.SubElement(li, 'span',
+                          {'class': 'error'}).text = 'No keyword defined '
+        else:
+            ET.SubElement(li, 'span',
+                          {'class': 'keyword'}
+                          ).text = command.get('keyword') + ' '
+        ET.SubElement(li, 'span',
+                      {'class': 'text'}).text = command.get('text', '')
+        ET.SubElement(li, 'p',
+                      {'class': 'subtext'}).text = command.get('subtext', '')
+    for hotkey in workflow.get('hotkeys', []):
+        li = ET.SubElement(cmdlist, 'li')
+        if hotkey.get('undefined'):
+            ET.SubElement(li, 'span',
+                          {'class': 'hotkey error'}).text = 'Not defined'
+        else:
+            ET.SubElement(li, 'span',
+                          {'class': 'hotkey'}
+                          ).text = (hotkey.get('key', '') + ' ' +
+                                    hotkey.get('string', ''))
+    return ET.tostring(root)
 
-	plist = listdir + "/" + item + "/info.plist" # find the plist file
-	folder = item # the strange foldernames that Alfred assigns the workflows...
 
-	try:
-		info = alp.readPlist(plist) # alp function
-	
-		# start to write the markup for the files 
-	
-		buffer = "<img src=\"file://localhost/" + listdir + item + "/icon.png\" height=\"50px\">"
-		if "name" in info:
-			buffer += "<font size=\"5em\"><b>" + info['name'] + "</b></font>\n<hr>"
-		else:
-			info['name'] = "EMPTY NAME"
-			buffer += "<font size=\"5em\"><b>" + info['name'] + "</b></font>\n<hr>"
-		if "bundleid" in info:
-			buffer += "\n\n(" + info['bundleid'] + ")"
-		else:
-			buffer += "\n\n<font color=\"red\">NO BUNDLE ID DEFINED</font>"
-		if "createdby" in info:
-			buffer += " by " + info['createdby'] + "\n"
-		else:
-			buffer += " <font color=\"red\">NO CREATOR ID</font>\n"
-		if "disabled" in info:
-			if info['disabled']:
-				buffer +=  " (<font color=\"red\">disabled</font>)\n" # Indicate that a workflow is disabled
+def main():
+    tempdir = tempfile.mkdtemp()
+    helpfile = os.path.join(tempdir, 'workflow_help.html')
+    workflows = []
+    root = os.path.abspath('..')
+    # list of directories in the
 
-		if info['description']: # Is the description present? Some people don't include these...
-			buffer +=  "######<font color=\"gray\">" + info['description'] + "</font>\n"
-		else:
-			buffer +=  "\n"
-	
-		# Start to go through the objects to look for keywords, script filters, and hotkeys
-		commands = ""
-		hotkeys = ""
-		if "objects" in info:
-			for item in info['objects']:
-				if item['type'] == "alfred.workflow.input.keyword":		# Keywords
-					if "keyword" in item['config']:
-						commands += "\r\n* `" + item['config']['keyword'] + "`"
-					else:
-						commands += "\r\n* <font color=\"red\">No Keyword Defined</font>"
-					if "text" in item['config']:
-						commands += " (" + item['config']['text'] + ")"
-					elif "subtext" in item['config']:
-						commands += " (" + item['config']['subtext'] + ")"
-				if item['type'] == "alfred.workflow.trigger.hotkey":	# Hotkeys
-					if hotkeys:
-						hotkeys += "\n\n"
-					if "hotmod" in item['config'] and item['config']['hotmod']:
-						if item['config']['hotmod'] in hotmod:
-							hotkeys += "\r\n* " + hotmod[item['config']['hotmod']] + " " + item['config']['hotstring']
-						else:
-							hotkeys += "\r\n* <font color=\"red\">Error reading hotkey</font>: try re-entering the hotkey in Alfred's preferences"
-					else:
-						hotkeys += "\r\n* " + "<font color=\"red\">Not yet defined</font>" # Hotkeys have to be defined when a user installs a workflow
-					if item['config']['argument']:
-						hotkeys += " (Takes " + hotarg[item['config']['argument']] + " as an argument)"	# Give any argument information... this should be expanded to be more helpful					
-				if item['type'] == "alfred.workflow.input.scriptfilter":	# Keywords from script filters
-					if "keyword" in item['config']:
-						commands += "\r\n* `" + item['config']['keyword'] + "`"
+    for filename in os.listdir(root):
+        p = os.path.join(root, filename)
+        if os.path.isdir(p):
+            try:
+                workflow = load_workflow(p)
+            except ValueError:
+                continue
+            workflows.append(workflow)
 
-					# Grabs explanatory text and subtext. People don't seem to use these in any particular way in that one would be more descriptive than the other
-					# So, I'm not sure how to deal with problem to present the best information. This is the current solution that is probably not the best.
+    workflows.sort(key=lambda d: d['name'])
+    buffer = []
+    for workflow in workflows:
+        buffer.append(workflow_html(workflow))
+    output = '\n'.join(buffer)
+    output = HTML % dict(content=output)
+    # Write to temporary HTML file
+    with open(helpfile, 'wb') as file:
+        file.write(output.encode('utf-8'))
+    subprocess.call(['open', helpfile])
+    # print(output)
 
-					if "subtext" in item['config']:
-						commands += " (" + item['config']['subtext'] + ")"
-					elif "text" in item['config']:
-						commands += " (" + item['config']['text'] + ")"
-					elif "title" in item['config']:
-						commands += " (" + item['config']['title'] + ")"
 
-		buffer += "\n\n" # Add in a few lines to separate the commands and hotkeys
-	
-		# Add in the markup for the commands and hotkeys together
-		if commands:						
-			buffer += "__Commands__\n" + commands
-		if hotkeys:
-			buffer += "\n\n__Hotkeys__\n" + hotkeys
-	
-		workflows[info['name']] = buffer # add into workflows dictionary with name as key and file markup as the content
-		
-	except: # when the ALP doesn't work, usually because of no bundle id.
-		workflows[folder]= "The info.plist file for this is not very valid... ALP can't handle it. It probably doesn't have a bundleid. Check the metadata."
-
-buffer = "" # buffer to write for the file
-
-# go through the workflows dictionary, and push those into the file, sorted alphabetically
-for key in sorted(workflows.keys(), key=lambda x: x.lower()): 
-	buffer += workflows[key] + "\n\n<br><br>"
-buffer = buffer.encode('utf-8')	# qlmanage needs this to be in utf-8, so we'll convert the ascii to that
-file.write(buffer)
-file.close()	# finished generating the file
-
-# display the file with the qlmanage debug tools
-command = "qlmanage -p " + edir + "/" + output_file + " -c .md -g libraries/QLMarkdown.qlgenerator >/dev/null 2>&1 &" # create the command. The ">/dev/null 2>&1 &" is there to ignore any output and run the command in the background... otherwise the computer will become unresponsive for a bit, and we all know that's not good.
-os.system(command)	# execute the command
-
-# At this point, the script ends, and Alfred has already notified you that the file is being created and could take some time.
-
-##
-#			Add in readme files for next version
-#			This code doesn't work...
-##			
-#			if 'readme' in info:
-#				readme = info['readme']
-#			else:
-#				print "No readme file included."				
-#			re.sub("^([\#]{1,})([a-zA-Z0-9 :.-]{1,})([\#]{1,})",
-#					"<b>\2</b>",
-#					readme)
+if __name__ == u"__main__":
+    main()
